@@ -9,6 +9,7 @@ import { useEffect, useRef, useState } from 'react'
 import { ROUTES, ROUTE_BY_ID, STOPS, FRAME } from '../data/campus'
 import { projectOnPath, forwardGap, metresBetween } from '../lib/geo'
 import { transport, pingServer } from '../lib/transport'
+import { backendName } from '../lib/supabase'
 import WaitingPanel from '../components/WaitingPanel'
 import './driver.css'
 
@@ -27,6 +28,7 @@ export default function Driver() {
   const [error, setError] = useState(null)
   const [occupancy, setOccupancy] = useState(12)
   const [server, setServer] = useState('checking')
+  const [pubError, setPubError] = useState(null)
 
   const watchId = useRef(null)
   const wakeLock = useRef(null)
@@ -109,7 +111,8 @@ export default function Driver() {
       capacity: 45,
       d: snap.d,
     })
-    setSent((n) => n + 1)
+      .then(() => { setSent((n) => n + 1); setPubError(null) })
+      .catch((e) => setPubError(e.message ?? 'publish failed'))
   }
 
   // Clean up if the tab closes or the component unmounts
@@ -145,7 +148,9 @@ export default function Driver() {
         <div>
           <h1>Driver mode</h1>
           <p>{running ? `${busName} · ${route?.name}` : 'Not on duty'}</p>
-          <p className={`dsrv ${server.startsWith('online') ? 'ok' : server === 'checking' ? '' : 'no'}`}>Server {server}</p>
+          <p className={`dsrv ${server.startsWith('online') ? 'ok' : server === 'checking' ? '' : 'no'}`}>
+            {backendName} · {server}
+          </p>
         </div>
         <a className="dlink" href="/">Student view</a>
       </header>
@@ -221,6 +226,7 @@ export default function Driver() {
         )}
 
         {error && <p className="derr">⚠ {error}</p>}
+        {pubError && <p className="derr">⚠ Could not send position: {pubError}</p>}
 
         {!running && (
           <div className="dhow">

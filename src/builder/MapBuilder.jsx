@@ -14,6 +14,7 @@ import {
 } from 'react-leaflet'
 import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
+import { supabase, hasSupabase } from '../lib/supabase'
 import './builder.css'
 
 const STORAGE = 'campusmove.builder.v1'
@@ -325,13 +326,22 @@ export default function MapBuilder() {
     if (!state.routes.some((r) => r.path.length > 1)) return setToast('Trace at least one route')
     setPublishing(true)
     try {
-      const r = await fetch('/api/campus', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      })
-      const d = await r.json()
-      setToast(r.ok ? `Published — ${d.stops} stops, ${d.routes} routes. Reload the app.` : `Failed: ${d.error}`)
-    } catch { setToast('Live server unreachable') }
+      if (hasSupabase) {
+        const { error } = await supabase.from('campus').upsert({
+          id: 1, data: payload, updated_at: new Date().toISOString(),
+        })
+        setToast(error
+          ? `Failed: ${error.message}`
+          : `Published — ${payload.stops.length} stops, ${payload.routes.length} routes. Reload the app.`)
+      } else {
+        const r = await fetch('/api/campus', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        })
+        const d = await r.json()
+        setToast(r.ok ? `Published — ${d.stops} stops, ${d.routes} routes. Reload the app.` : `Failed: ${d.error}`)
+      }
+    } catch (e) { setToast('Publish failed: ' + e.message) }
     setPublishing(false)
   }
 

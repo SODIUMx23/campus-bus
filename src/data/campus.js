@@ -8,6 +8,7 @@
  */
 import bundled from './campus.geo.json'
 import { makeFrame, makeProjector, measurePath, projectOnPath } from '../lib/geo'
+import { supabase, hasSupabase } from '../lib/supabase'
 
 /**
  * Campus data comes from the server when reachable (published from the Map
@@ -16,12 +17,18 @@ import { makeFrame, makeProjector, measurePath, projectOnPath } from '../lib/geo
  */
 let raw = bundled
 try {
-  const res = await fetch('/api/campus', { cache: 'no-store' })
-  if (res.ok) {
-    const live = await res.json()
+  if (hasSupabase) {
+    const { data } = await supabase.from('campus').select('data').eq('id', 1).maybeSingle()
+    const live = data?.data
     if (live?.stops?.length && live?.routes?.length) raw = live
+  } else {
+    const res = await fetch('/api/campus', { cache: 'no-store' })
+    if (res.ok) {
+      const live = await res.json()
+      if (live?.stops?.length && live?.routes?.length) raw = live
+    }
   }
-} catch { /* offline — bundled copy is fine */ }
+} catch { /* offline or not set up — bundled copy is fine */ }
 
 export const CAMPUS_SOURCE = raw === bundled ? 'bundled' : 'server'
 /** Route colours, kept in the app's purple family for visual consistency. */

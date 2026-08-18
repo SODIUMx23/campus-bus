@@ -10,6 +10,7 @@
  */
 import { useEffect, useState } from 'react'
 import { metresBetween } from './geo'
+import { supabase, hasSupabase, TICKET_TTL_MS } from './supabase'
 
 export const GEOFENCE_M = 30          // must be this close to the stop
 export const ALERT_THRESHOLD = 5      // driver gets an alarm at this many waiting
@@ -40,35 +41,77 @@ export function checkProximity(pos, stop) {
   return { ok, reason: ok ? 'ok' : 'too-far', distance, accuracy: pos.accuracy, grace }
 }
 
-/* ---------------- api ---------------- */
+/* ---------------- api (supabase in prod, node server in dev) ---------------- */
 
 export async function raiseTicket({ stopId, lat, lng, distance }) {
+  const device = deviceId()
+  if (hasSupabase) {
+    const { error } = await supabase.from('tickets').upsert({
+      id: `${stopId}:${device}`,
+      stop_id: stopId,
+      device_id: device,
+      lat, lng, distance_m: distance,
+      updated_at: new Date().toISOString(),
+    }, { onConflict: 'id', ignoreDuplicates: false })
+    if (error) throw new Error(error.message)
+    return
+  }
   const r = await fetch('/api/tickets', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ stop_id: stopId, device_id: deviceId(), lat, lng, distance_m: distance }),
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ stop_id: stopId, device_id: device, lat, lng, distance_m: distance }),
   })
   if (!r.ok) throw new Error((await r.json()).error ?? 'failed')
-  return r.json()
 }
 
 export async function cancelTicket(stopId) {
+  const device = deviceId()
+  if (hasSupabase) {
+    await supabase.from('tickets').delete().eq('id', `${stopId}:${device}`)
+    return
+  }
   await fetch('/api/tickets/cancel', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ stop_id: stopId, device_id: deviceId() }),
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ stop_id: stopId, device_id: device }),
   })
 }
 
+/** Driver reached a stop — everyone waiting there has boarded. */
 export async function clearStop(stopId) {
+  if (hasSupabase) {
+    await supabase.from('tickets').delete().eq('stop_id', stopId)
+    return
+  }
   await fetch('/api/tickets/clear', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ stop_id: stopId }),
   }).catch(() => {})
 }
 
-/** Poll the waiting counts. Returns a map of stop_id -> { count, oldest, devices }. */
+/** Fetch and group waiting requests by stop. */
+async function fetchTickets() {
+  if (hasSupabase) {
+    const cutoff = new Date(Date.now() - TICKET_TTL_MS).toISOString()
+    const { data, error } = await supabase
+      .from('tickets').select('*').gt('created_at', cutoff)
+    if (error) throw error
+    const byStop = {}
+    for (const t of data ?? []) {
+      const created = new Date(t.created_at).getTime()
+      byStop[t.stop_id] ??= { stop_id: t.stop_id, count: 0, oldest: created, devices: [] }
+      const g = byStop[t.stop_id]
+      g.count++
+      g.oldest = Math.min(g.oldest, created)
+      g.devices.push(t.device_id)
+    }
+    return byStop
+  }
+  const r = await fetch('/api/tickets', { cache: 'no-store' })
+  if (!r.ok) throw new Error('offline')
+  const d = await r.json()
+  return Object.fromEntries((d.stops ?? []).map((s) => [s.stop_id, s]))
+}
+
+/** Poll the waiting counts. Returns stop_id -> { count, oldest, devices }. */
 export function useTickets(intervalMs = 3000) {
   const [byStop, setByStop] = useState({})
 
@@ -76,11 +119,8 @@ export function useTickets(intervalMs = 3000) {
     let alive = true
     const load = async () => {
       try {
-        const r = await fetch('/api/tickets', { cache: 'no-store' })
-        if (!r.ok) return
-        const d = await r.json()
-        if (!alive) return
-        setByStop(Object.fromEntries((d.stops ?? []).map((s) => [s.stop_id, s])))
+        const d = await fetchTickets()
+        if (alive) setByStop(d)
       } catch { /* offline */ }
     }
     load()

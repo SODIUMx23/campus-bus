@@ -1,57 +1,90 @@
 /**
  * Live position transport.
  *
- * Talks to the CampusMove live server on the app's own origin (/api/...), so it
- * behaves the same on localhost, through a tunnel, or in production.
+ * Two interchangeable backends behind one interface:
+ *   • Supabase  — used in production (Vercel), when env vars are present
+ *   • local     — the Node server in server/live-server.mjs, for dev
  *
- * Uses SSE when it works and falls back to 2-second polling when it doesn't —
- * some proxies (Cloudflare quick tunnels among them) buffer event streams.
+ *   publish(record)   driver sends a position
+ *   end(tripId)       driver goes off duty
+ *   subscribe(cb)     receive the whole live fleet whenever it changes
  */
+import { supabase, hasSupabase, POSITION_DROP_MS } from './supabase'
 
 export const STALE_MS = 60_000
+const POLL_MS = 3000
 
-function createRemoteTransport() {
+/* ---------------- shared plumbing ---------------- */
+
+function pollingTransport({ kind, fetchFleet, publish, end }) {
   let latest = []
   const listeners = new Set()
-  let es = null
-  let lastEvent = 0
   let started = false
 
   const emit = () => listeners.forEach((cb) => cb(latest))
-  // /api/positions returns an array; the SSE stream sends { buses, tickets }
-  const apply = (data) => {
-    const buses = Array.isArray(data) ? data : data?.buses
-    if (Array.isArray(buses)) { latest = buses; emit() }
-  }
 
-  function connectSSE() {
+  async function tick() {
     try {
-      es?.close()
-      es = new EventSource('/api/stream')
-      es.onmessage = (e) => { lastEvent = Date.now(); try { apply(JSON.parse(e.data)) } catch {} }
-      es.onerror = () => { es?.close(); es = null }
-    } catch { es = null }
-  }
-
-  async function poll() {
-    if (Date.now() - lastEvent < 10_000) return   // SSE is healthy, save the request
-    try {
-      const r = await fetch('/api/positions', { cache: 'no-store' })
-      if (r.ok) apply(await r.json())
-      if (!es) connectSSE()
+      const rows = await fetchFleet()
+      if (Array.isArray(rows)) { latest = rows; emit() }
     } catch { /* offline — keep the last known fleet */ }
   }
 
-  function start() {
-    if (started) return
-    started = true
-    connectSSE()
-    poll()
-    setInterval(poll, 2000)
-  }
-
   return {
-    kind: 'server',
+    kind, publish, end,
+    snapshot: () => latest,
+    subscribe(cb) {
+      listeners.add(cb)
+      cb(latest)
+      if (!started) { started = true; tick(); setInterval(tick, POLL_MS) }
+      // Re-emit on a timer so "signal lost" badges refresh with no new data.
+      const t = setInterval(() => cb(latest), 2000)
+      return () => { listeners.delete(cb); clearInterval(t) }
+    },
+  }
+}
+
+/* ---------------- supabase ---------------- */
+
+function supabaseTransport() {
+  return pollingTransport({
+    kind: 'supabase',
+
+    async fetchFleet() {
+      const cutoff = new Date(Date.now() - POSITION_DROP_MS).toISOString()
+      const { data, error } = await supabase
+        .from('live_positions')
+        .select('*')
+        .gt('updated_at', cutoff)
+      if (error) throw error
+      // Normalise to the shape the app expects (ms epoch, not ISO)
+      return (data ?? []).map((r) => ({ ...r, updated_at: new Date(r.updated_at).getTime() }))
+    },
+
+    async publish(record) {
+      const { error } = await supabase.from('live_positions').upsert({
+        ...record,
+        updated_at: new Date().toISOString(),
+      })
+      if (error) throw error
+    },
+
+    async end(tripId) {
+      await supabase.from('live_positions').delete().eq('trip_id', tripId)
+    },
+  })
+}
+
+/* ---------------- local node server ---------------- */
+
+function localTransport() {
+  return pollingTransport({
+    kind: 'local-server',
+    async fetchFleet() {
+      const r = await fetch('/api/positions', { cache: 'no-store' })
+      if (!r.ok) throw new Error('offline')
+      return r.json()
+    },
     async publish(record) {
       await fetch('/api/positions', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -64,21 +97,20 @@ function createRemoteTransport() {
         body: JSON.stringify({ trip_id: tripId }), keepalive: true,
       }).catch(() => {})
     },
-    snapshot: () => latest,
-    subscribe(cb) {
-      listeners.add(cb)
-      cb(latest)
-      start()
-      const tick = setInterval(() => cb(latest), 2000)  // refresh "stale" badges
-      return () => { listeners.delete(cb); clearInterval(tick) }
-    },
-  }
+  })
 }
 
-export const transport = createRemoteTransport()
+export const transport = hasSupabase ? supabaseTransport() : localTransport()
 
-/** Is the live server reachable? Drives the connection pill in the UI. */
+/** Is the backend reachable? Drives the connection dot in the UI. */
 export async function pingServer() {
+  if (hasSupabase) {
+    const { error } = await supabase.from('live_positions').select('trip_id').limit(1)
+    if (error) return null
+    const { count } = await supabase
+      .from('live_positions').select('*', { count: 'exact', head: true })
+    return { ok: true, buses: count ?? 0, backend: 'supabase' }
+  }
   try {
     const r = await fetch('/api/health', { cache: 'no-store' })
     return r.ok ? await r.json() : null
