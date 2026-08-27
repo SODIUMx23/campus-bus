@@ -3,12 +3,14 @@ import CampusMap from './components/CampusMap'
 import SatelliteMap from './components/SatelliteMap'
 import InstallPrompt from './components/InstallPrompt'
 import WaitingButton from './components/WaitingButton'
+import StepCounter from './components/StepCounter'
 import { useTickets } from './lib/tickets'
 import {
   ROUTES, ROUTE_BY_ID, STOPS, STOP_LIST, routesForStop, CAMPUS_NAME,
 } from './data/campus'
 import { useFleet, etaForStop, TIME_SCALE } from './hooks/useFleet'
 import { useLiveBuses } from './hooks/useLiveBuses'
+import { useStepCounter } from './hooks/useStepCounter'
 import { pingServer } from './lib/transport'
 import './App.css'
 
@@ -35,6 +37,7 @@ export default function App() {
   const { buses: simBuses, clock } = useFleet(running)
   const liveBuses = useLiveBuses()
   const tickets = useTickets(3000)
+  const steps = useStepCounter()
   const buses = [...(showSim ? simBuses : []), ...liveBuses]
 
   useEffect(() => {
@@ -130,6 +133,11 @@ export default function App() {
         </button>
 
         <div className="sheet-body">
+          <div className="block">
+            <div className="blockhead"><h2>Steps</h2></div>
+            <StepCounter counter={steps} />
+          </div>
+
           {/* stop + arrivals */}
           {stop && (
             <>
